@@ -1,136 +1,81 @@
 package com.pentaho.metaverse.analyzer.kettle.extensionpoints;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.pentaho.dictionary.DictionaryConst;
-import com.pentaho.dictionary.MetaverseTransientNode;
-import com.pentaho.metaverse.analyzer.kettle.DatabaseConnectionAnalyzer;
-import com.pentaho.metaverse.analyzer.kettle.JobAnalyzer;
-import com.pentaho.metaverse.analyzer.kettle.TransformationAnalyzer;
-import com.pentaho.metaverse.analyzer.kettle.step.IStepAnalyzer;
-import com.pentaho.metaverse.analyzer.kettle.step.StepAnalyzerProvider;
-import com.pentaho.metaverse.analyzer.kettle.step.TableOutputStepAnalyzer;
-import com.pentaho.metaverse.analyzer.kettle.step.TextFileInputStepAnalyzer;
-import com.pentaho.metaverse.api.IMetaverseReader;
-import com.pentaho.metaverse.graph.BlueprintsGraphMetaverseReader;
-import com.pentaho.metaverse.impl.AnalysisContext;
-import com.pentaho.metaverse.impl.DocumentController;
-import com.pentaho.metaverse.impl.MetaverseBuilder;
-import com.pentaho.metaverse.impl.MetaverseComponentDescriptor;
-import com.pentaho.metaverse.impl.MetaverseObjectFactory;
-import com.pentaho.metaverse.impl.Namespace;
-import com.tinkerpop.blueprints.Graph;
-import com.tinkerpop.blueprints.KeyIndexableGraph;
-import com.tinkerpop.blueprints.Vertex;
-import com.tinkerpop.blueprints.impls.tg.TinkerGraph;
-import com.tinkerpop.blueprints.util.wrappers.id.IdGraph;
-import org.apache.commons.io.FileUtils;
+import com.pentaho.metaverse.api.model.IExecutionData;
+import com.pentaho.metaverse.api.model.IExecutionEngine;
+import com.pentaho.metaverse.api.model.IExecutionProfile;
+import com.pentaho.metaverse.api.model.IParamInfo;
+import com.pentaho.metaverse.impl.model.ExecutionData;
+import com.pentaho.metaverse.impl.model.ExecutionEngine;
+import com.pentaho.metaverse.impl.model.ExecutionProfile;
+import com.pentaho.metaverse.impl.model.ParamInfo;
+import org.pentaho.di.core.KettleClientEnvironment;
 import org.pentaho.di.core.exception.KettleException;
 import org.pentaho.di.core.extension.ExtensionPoint;
 import org.pentaho.di.core.extension.ExtensionPointInterface;
 import org.pentaho.di.core.logging.LogChannelInterface;
+import org.pentaho.di.core.parameters.UnknownParamException;
 import org.pentaho.di.trans.Trans;
 import org.pentaho.di.trans.TransListener;
 import org.pentaho.di.trans.TransMeta;
+import org.pentaho.di.trans.step.StepMetaDataCombi;
 import org.pentaho.di.version.BuildVersion;
-import org.pentaho.platform.api.metaverse.IAnalysisContext;
-import org.pentaho.platform.api.metaverse.IDocumentAnalyzer;
-import org.pentaho.platform.api.metaverse.IMetaverseComponentDescriptor;
-import org.pentaho.platform.api.metaverse.IMetaverseDocument;
-import org.pentaho.platform.api.metaverse.IMetaverseNode;
-import org.pentaho.platform.api.metaverse.IMetaverseObjectFactory;
-import org.pentaho.platform.api.metaverse.INamespace;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintStream;
+import java.sql.Timestamp;
+import java.util.Arrays;
 import java.util.Date;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
-import java.util.UUID;
+import java.util.Map;
 
 /**
- * Created by mburgess on 8/25/14.
+ * An extension point to gather runtime data for an execution of a transformation into an ExecutionProfile object
  */
 @ExtensionPoint(
-    description = "Transformation Runtime metadata extractor",
-    extensionPointId = "TransformationStartThreads",
-    id = "transRuntimeMetaverse" )
+  description = "Transformation Runtime metadata extractor",
+  extensionPointId = "TransformationStartThreads",
+  id = "transRuntimeMetaverse" )
 public class TransformationRuntimeExtensionPoint implements ExtensionPointInterface, TransListener {
 
-  private Graph g;
-  private DocumentController dc;
-  private MetaverseBuilder metaverseBuilder;
-  private IMetaverseReader metaverseReader;
-  private TransformationAnalyzer transAnalyzer;
-  private Trans trans;
+  private Map<Trans, IExecutionProfile> profileMap = new HashMap<Trans, IExecutionProfile>();
 
-  public TransformationRuntimeExtensionPoint() {
+  /**
+   * Callback when a transformation is about to be started
+   *
+   * @param logChannelInterface A reference to the log in this context (the Trans object's log)
+   * @param o                   The object being operated on (Trans in this case)
+   * @throws KettleException
+   */
+  @Override
+  public void callExtensionPoint( LogChannelInterface logChannelInterface, Object o ) throws KettleException {
 
-    g = new IdGraph<KeyIndexableGraph>( new TinkerGraph() );
-
-    dc = new DocumentController();
-    metaverseBuilder = new MetaverseBuilder( g );
-    metaverseBuilder.setMetaverseObjectFactory( new MetaverseObjectFactory() );
-
-    metaverseReader = new BlueprintsGraphMetaverseReader( g );
-
-    dc.setMetaverseBuilder( metaverseBuilder );
-
-    final DatabaseConnectionAnalyzer dba = new DatabaseConnectionAnalyzer();
-
-    final TextFileInputStepAnalyzer tfia = new TextFileInputStepAnalyzer() {
-      {
-        setDatabaseConnectionAnalyzer( dba );
-      }
-    };
-
-    final TableOutputStepAnalyzer tfoa = new TableOutputStepAnalyzer() {
-      {
-        setDatabaseConnectionAnalyzer( dba );
-      }
-    };
-
-    final StepAnalyzerProvider ksap = new StepAnalyzerProvider();
-    ksap.setStepAnalyzers( new HashSet<IStepAnalyzer>() {
-      {
-        add( tfia );
-        add( tfoa );
-      }
-    } );
-    final TransformationAnalyzer ta = new TransformationAnalyzer() {
-      {
-        setStepAnalyzerProvider( ksap );
-      }
-    };
-    transAnalyzer = ta;
-    final JobAnalyzer ja = new JobAnalyzer();
-    dc.setDocumentAnalyzers( new HashSet<IDocumentAnalyzer>() {
-      {
-        add( ta );
-        add( ja );
-      }
-    } );
+    // Transformation Started listeners get called after the extension point is invoked, so just add a trans listener
+    if ( o != null && o instanceof Trans ) {
+      Trans trans = ( (Trans) o );
+      trans.addTransListener( this );
+    }
 
   }
 
-  @Override public void callExtensionPoint( LogChannelInterface logChannelInterface, Object o ) throws KettleException {
-    trans = (Trans) o;
+  /**
+   * Called when a transformation is started (if this object has been registered as a listener for the Trans)
+   *
+   * @param trans a reference to the started transformation
+   * @throws org.pentaho.di.core.exception.KettleException
+   */
+  @Override
+  public void transStarted( Trans trans ) throws KettleException {
+    if ( trans == null ) {
+      return;
+    }
 
     TransMeta transMeta = trans.getTransMeta();
-
-    IMetaverseObjectFactory objectFactory = metaverseBuilder.getMetaverseObjectFactory();
-
-    IAnalysisContext context = new AnalysisContext( DictionaryConst.CONTEXT_RUNTIME, trans );
-
-    IMetaverseNode runtimeInfo = addRuntimeNode( trans, context, objectFactory );
-    IMetaverseNode executionNode = addExecutionEngineNode( trans, objectFactory );
-
-    metaverseBuilder.addLink( runtimeInfo, "executed by", executionNode );
-
-    IMetaverseDocument transDoc = objectFactory.createDocumentObject();
-    IMetaverseNode locatorNode = new MetaverseTransientNode();
-    locatorNode.setProperty( DictionaryConst.PROPERTY_NAME, "EXTENSION-POINT-LOCATOR" );
-    locatorNode.setProperty( DictionaryConst.PROPERTY_TYPE, DictionaryConst.NODE_TYPE_LOCATOR );
-    locatorNode.setLogicalIdGenerator( DictionaryConst.LOGICAL_ID_GENERATOR_LOCATOR );
-    INamespace parentNamespace = new Namespace( locatorNode.getLogicalId() );
 
     File f = new File( trans.getFilename() );
 
@@ -141,100 +86,66 @@ public class TransformationRuntimeExtensionPoint implements ExtensionPointInterf
       e.printStackTrace();
     }
 
-    transDoc.setNamespace( parentNamespace );
-    transDoc.setContent( trans );
-    transDoc.setStringID( filePath );
-//    transDoc.setName( transMeta.getFilename() );
-    transDoc.setName( transMeta.getName() );
-    transDoc.setExtension( "ktr" );
-    transDoc.setMimeType( "text/xml" );
-    transDoc.setType( DictionaryConst.NODE_TYPE_TRANS );
-    transDoc.setProperty( DictionaryConst.PROPERTY_PATH, filePath );
-    transDoc.setProperty( DictionaryConst.PROPERTY_NAMESPACE, locatorNode.getLogicalId() );
-    transDoc.setProperty( "locator", locatorNode.getName() );
-    transDoc.setLogicalIdGenerator( DictionaryConst.LOGICAL_ID_GENERATOR_DOCUMENT );
-    transDoc.setContext( context );
+    ExecutionProfile executionProfile = new ExecutionProfile();
 
-    IMetaverseComponentDescriptor descriptor = new MetaverseComponentDescriptor(
-        transMeta.getName(),
-        DictionaryConst.NODE_TYPE_TRANS,
-        parentNamespace,
-        context );
+    // Set artifact information (path, type, description, etc.)
+    executionProfile.setPath( filePath );
+    executionProfile.setType( DictionaryConst.NODE_TYPE_TRANS );
+    executionProfile.setDescription( transMeta.getDescription() );
 
-    try {
-      IMetaverseNode node = transAnalyzer.analyze( descriptor, transDoc );
-      metaverseBuilder.addLink( runtimeInfo, "executed", node );
-    } catch ( Exception e ) {
-      throw new KettleException( e );
-    }
+    // Set execution engine information
+    IExecutionEngine executionEngine = new ExecutionEngine();
+    executionEngine.setName( "Pentaho Data Integration" );
+    executionEngine.setVersion( BuildVersion.getInstance().getVersion() );
+    executionEngine.setDescription(
+      "Pentaho data integration prepares and blends data to create a complete picture of your business "
+        + "that drives actionable insights." );
+    executionProfile.setExecutionEngine( executionEngine );
 
-    trans.addTransListener( this );
-  }
+    IExecutionData executionData = executionProfile.getExecutionData();
 
-  private IMetaverseNode addRuntimeNode( Trans trans, IAnalysisContext context,
-      IMetaverseObjectFactory objectFactory ) {
-    IMetaverseNode runtimeNode = new MetaverseTransientNode();
-    runtimeNode.setProperty( DictionaryConst.PROPERTY_NAME, DictionaryConst.NODE_TYPE_RUNTIME );
-    runtimeNode.setProperty( DictionaryConst.PROPERTY_TYPE, DictionaryConst.NODE_TYPE_RUNTIME );
-    runtimeNode.setLogicalIdGenerator( DictionaryConst.LOGICAL_ID_GENERATOR_LOCATOR );
+    // Store execution information (client, server, user, etc.)
+    executionData.setStartTime( new Timestamp( new Date().getTime() ) );
+    executionData.setClientExecutor( KettleClientEnvironment.getInstance().getClient().name() );
+    executionData.setExecutorUser( trans.getExecutingUser() );
+    executionData.setExecutorServer( trans.getExecutingServer() );
 
-    long timestamp = new Date().getTime();
-    String runtimeId = trans.getLogChannelId() == null ? UUID.randomUUID().toString() : trans.getLogChannelId();
-    IMetaverseComponentDescriptor runTimeDescriptor = new MetaverseComponentDescriptor(
-        runtimeId,
-        DictionaryConst.NODE_TYPE_RUNTIME,
-        new Namespace( runtimeNode.getLogicalId() ),
-        context );
-
-    // add a runtime node so we can identify them
-    IMetaverseNode runtimeInfo = objectFactory.createNodeObject(
-      runtimeId, runTimeDescriptor.getName(), runTimeDescriptor.getType() );
-
-    runtimeInfo.setProperty( "executionDate", String.valueOf( timestamp ) );
-    runtimeInfo.setProperty( DictionaryConst.PROPERTY_PATH, trans.getFilename() );
-    runtimeInfo.setProperty( DictionaryConst.PROPERTY_LOGICAL_ID, runtimeNode.getLogicalId() );
-    runtimeInfo.setProperty( "user", trans.getExecutingUser() );
-
-    metaverseBuilder.addNode( runtimeInfo );
-    List<String> vars = trans.getTransMeta().getUsedVariables();
+    // Store variables
+    List<String> vars = transMeta.getUsedVariables();
+    Map<Object, Object> variableMap = executionData.getVariables();
     for ( String var : vars ) {
       String value = trans.getVariable( var );
-      runtimeInfo.setProperty( "parameter_" + var, value );
+      variableMap.put( var, value );
     }
 
-    return runtimeInfo;
+    // Store parameters
+    String[] params = trans.listParameters();
+    List<IParamInfo<String>> paramList = executionData.getParameters();
+    if ( params != null ) {
+      for ( String param : params ) {
+        try {
+          ParamInfo paramInfo = new ParamInfo( param, trans.getParameterDescription( param ),
+            trans.getParameterDefault( param ) );
+          paramList.add( paramInfo );
+        } catch ( UnknownParamException e ) {
+          e.printStackTrace();
+        }
+      }
+    }
 
-  }
+    // Store arguments
+    String[] args = trans.getArguments();
+    List<Object> argList = executionData.getArguments();
+    if ( args != null ) {
+      argList.addAll( Arrays.asList( args ) );
+    }
 
-  private IMetaverseNode addExecutionEngineNode( Trans trans, IMetaverseObjectFactory objectFactory ) {
-    IMetaverseNode pdi = new MetaverseTransientNode();
-    pdi.setProperty( DictionaryConst.PROPERTY_NAME, "Pentaho Data Integration" );
-    pdi.setProperty( DictionaryConst.PROPERTY_TYPE, DictionaryConst.NODE_TYPE_EXECUTION_ENGINE );
-
-    IMetaverseNode node = objectFactory.createNodeObject(
-      new Namespace( pdi.getLogicalId() ),
-      "Pentaho Data Integration [" + trans.getExecutingServer() + "]",
-      DictionaryConst.NODE_TYPE_EXECUTION_ENGINE );
-
-    String version = BuildVersion.getInstance().getVersion();
-    node.setProperty( "version", version );
-    metaverseBuilder.addNode( node );
-    return node;
-  }
-
-  /**
-   * This transformation started
-   *
-   * @param trans
-   * @throws org.pentaho.di.core.exception.KettleException
-   */
-  @Override
-  public void transStarted( Trans trans ) throws KettleException {
-    // Do nothing here, we've already done setup as part of the extension point
+    // Save the execution profile for later
+    profileMap.put( trans, executionProfile );
   }
 
   /**
-   * This transformation went from an in-active to an active state.
+   * This transformation went from an inactive to an active state.
    *
    * @param trans
    * @throws org.pentaho.di.core.exception.KettleException
@@ -253,21 +164,52 @@ public class TransformationRuntimeExtensionPoint implements ExtensionPointInterf
   @Override
   public void transFinished( Trans trans ) throws KettleException {
 
-    // get the vertex that represents the runtime node
-    Vertex vertex = g.getVertex( trans.getLogChannelId() );
+    // Get the current execution profile for this transformation
+    IExecutionProfile executionProfile = profileMap.remove( trans );
+    ExecutionData executionData = (ExecutionData) executionProfile.getExecutionData();
+    executionData.setFailureCount( trans.getResult().getNrErrors() );
 
-    vertex.setProperty( "numberOfErrors", String.valueOf( trans.getResult().getNrErrors() ) );
-    vertex.setProperty( "rowsWritten", String.valueOf( trans.getResult().getNrLinesWritten() ) );
-    vertex.setProperty( "rowsRead", String.valueOf( trans.getResult().getNrLinesRead() ) );
-    vertex.setProperty( "rowsInput", String.valueOf( trans.getResult().getNrLinesInput() ) );
-    vertex.setProperty( "rowsOutput", String.valueOf( trans.getResult().getNrLinesOutput() ) );
-
-    File exportFile = new File( trans.getTransMeta().getName() + " - export.graphml" );
-    BlueprintsGraphMetaverseReader metaverseReader = new BlueprintsGraphMetaverseReader( g );
+    // TODO where to persist the execution profile?
     try {
-      FileUtils.writeStringToFile( exportFile, metaverseReader.exportToXml(), "UTF-8" );
+      dumpExecutionProfile( System.out, executionProfile );
     } catch ( IOException e ) {
-      e.printStackTrace();
+      throw new KettleException( e );
+    }
+
+  }
+
+  // TODO move this somewhere else?
+  protected void dumpExecutionProfile( PrintStream out, IExecutionProfile executionProfile ) throws IOException {
+    ObjectMapper mapper = new ObjectMapper();
+    mapper.enable( SerializationFeature.INDENT_OUTPUT );
+    mapper.disable( SerializationFeature.FAIL_ON_EMPTY_BEANS );
+    mapper.enable( SerializationFeature.WRAP_EXCEPTIONS );
+    try {
+      out.println( mapper.writeValueAsString( executionProfile ) );
+    } catch ( JsonProcessingException jpe ) {
+      throw new IOException( jpe );
+    }
+  }
+
+  @ExtensionPoint(
+    description = "Transformation step external resource listener",
+    extensionPointId = "StepBeforeStart",
+    id = "stepExternalResource" )
+  public static class ExternalResourceConsumerListener implements ExtensionPointInterface {
+
+
+    /**
+     * This method is called by the Kettle code when a step is about to start
+     *
+     * @param log    the logging channel to log debugging information to
+     * @param object The subject object that is passed to the plugin code
+     * @throws KettleException In case the plugin decides that an error has occurred
+     *                         and the parent process should stop.
+     */
+    @Override
+    public void callExtensionPoint( LogChannelInterface log, Object object ) throws KettleException {
+      StepMetaDataCombi stepCombi = (StepMetaDataCombi) object;
+      // TODO get steps that use external resources, match them to this step
     }
   }
 }
